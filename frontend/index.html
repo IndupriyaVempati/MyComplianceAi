@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Surtn - the AI Assistant</title>
+  <link rel="icon" type="image/png" href="/Surtn_Favicon.png?v=2" />
+  <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+  <script>
+    (function () {
+      try {
+        const storageKey = "surtn-ui-theme";
+        const theme = localStorage.getItem(storageKey) || "dark";
+        if (theme === "dark") {
+          document.documentElement.classList.add("dark");
+        } else {
+          document.documentElement.classList.remove("dark");
+        }
+      } catch (e) { }
+    })();
+  </script>
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+
+</html>

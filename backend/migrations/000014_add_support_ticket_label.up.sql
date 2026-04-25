@@ -1,0 +1,1 @@
+ALTER TABLE support_ticket ADD COLUMN IF NOT EXISTS label TEXT;

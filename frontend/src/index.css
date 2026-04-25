@@ -1,0 +1,213 @@
+@import url('https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-primary:          #00386B;
+  --color-secondary:        #2B93D1;
+  --color-neutral:          #CFECFB;
+  --color-accent-primary:   #FFC20E;
+  --color-accent-secondary: #059669;
+  --color-text-dark:        #1E293B;
+  --color-text-mid:         #334155;
+  --color-text-light:       #64748B;
+  --color-bg-page:          #F0F4F8;
+  --color-bg-card:          #FFFFFF;
+  --color-status-green:     #16A34A;
+  --color-status-amber:     #D97706;
+  --color-status-red:       #DC2626;
+  --font-primary: 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.10);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,0.12);
+  --radius-sm: 6px; --radius-md: 10px; --radius-lg: 16px;
+  --radius-xl: 24px; --radius-full: 9999px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-primary);
+    background-color: var(--color-bg-page);
+    color: var(--color-text-dark);
+    -webkit-font-smoothing: antialiased;
+    @apply transition-colors duration-300;
+  }
+
+  html.dark body,
+  .dark body {
+    @apply bg-[#212121] text-[#ececec];
+  }
+
+  button {
+    @apply focus:outline-none focus:ring-0;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  /* slate-300 */
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+  /* slate-400 */
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #444;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Markdown prose overrides for dark mode */
+.dark .prose {
+  color: #ececec;
+}
+
+.dark .prose h1,
+.dark .prose h2,
+.dark .prose h3,
+.dark .prose h4 {
+  color: #ececec;
+}
+
+.dark .prose strong {
+  color: #ececec;
+}
+
+.dark .prose code {
+  color: #e5c07b;
+  background: #2f2f2f;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+
+.dark .prose pre {
+  background: #1a1a1a;
+  border: 1px solid #3a3a3a;
+}
+
+.dark .prose pre code {
+  background: transparent;
+  color: #abb2bf;
+}
+
+.dark .prose a {
+  color: #7aa2f7;
+}
+
+.dark .prose blockquote {
+  border-left-color: #444;
+  color: #aaa;
+}
+
+.dark .prose hr {
+  border-color: #3a3a3a;
+}
+
+.dark .prose ol>li::marker,
+.dark .prose ul>li::marker {
+  color: #888;
+}
+
+.dark .prose th {
+  color: #ececec;
+}
+
+.dark .prose th {
+  border-color: #3a3a3a;
+}
+
+/* Force Light Mode / Print mode styling for PDFs */
+.pdf-mode, 
+.pdf-mode * {
+  color: #000000 !important;
+}
+
+.pdf-mode {
+  background-color: #ffffff !important;
+  padding: 20px !important;
+  width: 100% !important;
+  height: auto !important;
+  overflow: visible !important;
+}
+
+.pdf-mode .bg-gray-100,
+.pdf-mode .dark\:bg-\[\#2f2f2f\],
+.pdf-mode .dark\:bg-\[\#2a2a2a\],
+.pdf-mode .bg-white {
+  background-color: #f3f4f6 !important; /* light gray for bubbles */
+  border: 1px solid #e5e7eb !important;
+}
+
+/* AI Message Bubble Override */
+.pdf-mode [class*="prose"] {
+  color: #000 !important;
+  max-width: 100% !important;
+}
+
+.pdf-mode .prose Code,
+.pdf-mode .prose pre {
+    background-color: #f3f4f6 !important;
+    border: 1px solid #e5e7eb !important;
+    color: #333 !important;
+}
+
+/* User Message Bubble Override */
+.pdf-mode .bg-gray-200 {
+  background-color: #e5e7eb !important; 
+  color: #000 !important;
+}
+
+/* Ensure no scrollbars and full expanding heights */
+.pdf-mode > div {
+  overflow: visible !important;
+  height: auto !important;
+  max-height: none !important;
+}
+
+/* Custom slim scrollbar */
+.slim-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #64748B transparent;
+}
+.slim-scrollbar::-webkit-scrollbar {
+  width: 5px;
+}
+.slim-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.slim-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #64748B;
+  border-radius: 9999px;
+}
+.slim-scrollbar:hover::-webkit-scrollbar-thumb {
+  background-color: #94A3B8;
+}

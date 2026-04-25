@@ -1,0 +1,154 @@
+import { useCallback, useEffect, useReducer } from "react";
+import { useQueryClient } from "react-query";
+import orderBy from "lodash/orderBy";
+import { getAssistants } from "../api/assistants";
+
+export interface Config {
+  assistant_id: string;
+  name: string;
+  updated_at: string;
+  config: {
+    deleted?: boolean;
+    configurable?: {
+      type?: string;
+      "type==agent/tools"?: {
+        type: string;
+        name: string;
+        description: string;
+      }[];
+      [key: string]: unknown;
+    };
+  };
+  public: boolean;
+  mine?: boolean;
+}
+
+export interface ConfigListProps {
+  configs: Config[] | null;
+  saveConfig: (
+    key: string,
+    config: Config["config"],
+    files: File[],
+    isPublic: boolean,
+    assistantId?: string,
+  ) => Promise<string>;
+  deleteConfig: (assistantId: string) => Promise<void>;
+  deleteFile: (assistantId: string, filename: string) => Promise<void>;
+}
+
+function configsReducer(
+  state: Config[] | null,
+  action: Config | Config[],
+): Config[] | null {
+  state = state ?? [];
+  if (!Array.isArray(action)) {
+    const newConfig = action;
+    action = [
+      ...state.filter((c) => c.assistant_id !== newConfig.assistant_id),
+      newConfig,
+    ];
+  }
+  return orderBy(action, "updated_at", "desc");
+}
+
+export function useConfigList(): ConfigListProps {
+  const queryClient = useQueryClient();
+  const [configs, setConfigs] = useReducer(configsReducer, null);
+
+  useEffect(() => {
+    async function fetchConfigs() {
+      const assistants = await getAssistants();
+      setConfigs(
+        assistants ? assistants.map((c) => ({ ...c, mine: true })) : [],
+      );
+    }
+
+    fetchConfigs();
+  }, []);
+
+  const saveConfig = useCallback(
+    async (
+      name: string,
+      config: Config["config"],
+      files: File[],
+      isPublic: boolean,
+      assistantId?: string,
+    ): Promise<string> => {
+      const token = localStorage.getItem("auth_token");
+      const confResponse = await fetch(
+        assistantId ? `/api/assistants/${assistantId}` : "/api/assistants",
+        {
+          method: assistantId ? "PUT" : "POST",
+          body: JSON.stringify({ name, config, public: isPublic }),
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          },
+        },
+      );
+      const savedConfig = (await confResponse.json()) as Config;
+      if (files.length) {
+        const assistant_id = savedConfig.assistant_id;
+        const formData = files.reduce((formData, file) => {
+          formData.append("files", file);
+          return formData;
+        }, new FormData());
+        formData.append(
+          "config",
+          JSON.stringify({ configurable: { assistant_id } }),
+        );
+        const token = localStorage.getItem("auth_token");
+        await fetch(`/api/ingest`, {
+          method: "POST",
+          headers: {
+            ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          },
+          body: formData,
+        });
+      }
+      setConfigs({ ...savedConfig, mine: true });
+      queryClient.invalidateQueries(["assistant", savedConfig.assistant_id]);
+      return savedConfig.assistant_id;
+    },
+    [queryClient],
+  );
+
+  const deleteConfig = useCallback(
+    async (assistantId: string): Promise<void> => {
+      const token = localStorage.getItem("auth_token");
+      await fetch(`/api/assistants/${assistantId}`, {
+        method: "DELETE",
+        headers: {
+          Accept: "application/json",
+          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+        },
+      });
+      setConfigs((configs || []).filter((c) => c.assistant_id !== assistantId));
+      queryClient.invalidateQueries(["assistant", assistantId]);
+    },
+    [configs, queryClient],
+  );
+
+  const deleteFile = useCallback(
+    async (assistantId: string, filename: string): Promise<void> => {
+      const token = localStorage.getItem("auth_token");
+      await fetch(`/api/assistants/${assistantId}/files/${encodeURIComponent(filename)}`, {
+        method: "DELETE",
+        headers: {
+          Accept: "application/json",
+          ...(token ? { "Authorization": `Bearer ${token}` } : {})
+        },
+      });
+      queryClient.invalidateQueries(["assistant", assistantId]);
+    },
+    [queryClient],
+  );
+
+  return {
+    configs,
+    saveConfig,
+    deleteConfig,
+    deleteFile,
+  };
+}
