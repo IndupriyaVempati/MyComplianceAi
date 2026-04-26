@@ -18,9 +18,9 @@ async def create_admin(username, password):
     from app.lifespan import _init_connection
     
     app_pool = await asyncpg.create_pool(
-        database=os.environ.get("POSTGRES_DB", "opengpts"),
-        user=os.environ.get("POSTGRES_USER", "postgres"),
-        password=os.environ.get("POSTGRES_PASSWORD", "postgres"),
+        database=os.environ.get("POSTGRES_DB", "MyComplianceAi"),
+        user=os.environ.get("POSTGRES_USER", "indupriya"),
+        password=os.environ.get("POSTGRES_PASSWORD", "indupriya"),
         host=os.environ.get("POSTGRES_HOST", "localhost"),
         port=os.environ.get("POSTGRES_PORT", "5432"),
         init=_init_connection,

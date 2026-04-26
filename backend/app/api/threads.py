@@ -3,7 +3,7 @@ from typing import Annotated, Any, Dict, List, Optional, Sequence, Union
 from uuid import uuid4
 import re
 
-from fastapi import APIRouter, HTTPException, Path, UploadFile, Form
+from fastapi import APIRouter, HTTPException, UploadFile, Form
 from langchain.schema.messages import AnyMessage
 from pydantic import BaseModel, Field
 
@@ -15,10 +15,6 @@ from app.pdf_generator import generate_pdf_from_messages
 from fastapi.responses import Response
 
 router = APIRouter()
-
-
-ThreadID = Annotated[str, Path(description="The ID of the thread.")]
-
 
 class ThreadPutRequest(BaseModel):
     """Payload for creating a thread."""
@@ -43,7 +39,7 @@ async def list_threads(user: AuthedUser) -> List[Thread]:
 @router.get("/{tid}/state")
 async def get_thread_state(
     user: AuthedUser,
-    tid: ThreadID,
+    tid: str,
 ):
     """Get state for a thread."""
     thread = await storage.get_thread(user.user_id, tid)
@@ -62,7 +58,7 @@ async def get_thread_state(
 @router.post("/{tid}/state")
 async def add_thread_state(
     user: AuthedUser,
-    tid: ThreadID,
+    tid: str,
     payload: ThreadPostRequest,
 ):
     """Add state to a thread."""
@@ -83,7 +79,7 @@ async def add_thread_state(
 @router.get("/{tid}/history")
 async def get_thread_history(
     user: AuthedUser,
-    tid: ThreadID,
+    tid: str,
 ):
     """Get all past states for a thread."""
     thread = await storage.get_thread(user.user_id, tid)
@@ -102,7 +98,7 @@ async def get_thread_history(
 @router.get("/{tid}")
 async def get_thread(
     user: AuthedUser,
-    tid: ThreadID,
+    tid: str,
 ) -> Thread:
     """Get a thread by ID."""
     thread = await storage.get_thread(user.user_id, tid)
@@ -128,7 +124,7 @@ async def create_thread(
 @router.put("/{tid}")
 async def upsert_thread(
     user: AuthedUser,
-    tid: ThreadID,
+    tid: str,
     thread_put_request: ThreadPutRequest,
 ) -> Thread:
     """Update a thread."""
@@ -143,7 +139,7 @@ async def upsert_thread(
 @router.delete("/{tid}")
 async def delete_thread(
     user: AuthedUser,
-    tid: ThreadID,
+    tid: str,
 ):
     """Delete a thread by ID."""
     await storage.delete_thread(user.user_id, tid)
@@ -153,7 +149,7 @@ async def delete_thread(
 @router.get("/{tid}/pdf")
 async def download_thread_pdf(
     user: AuthedUser,
-    tid: ThreadID,
+    tid: str,
 ):
     """Generate and download a PDF of the thread history."""
     thread = await storage.get_thread(user.user_id, tid)
@@ -185,7 +181,7 @@ async def download_thread_pdf(
 @router.post("/{tid}/email-pdf")
 async def email_thread_pdf(
     user: AuthedUser,
-    tid: ThreadID,
+    tid: str,
     email: str = Form(...),
 ):
     """Email a generated PDF of the thread to the given address."""

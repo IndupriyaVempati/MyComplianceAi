@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+from functools import lru_cache
 from typing import BinaryIO, List, Optional
 
 from fastapi import UploadFile
@@ -22,7 +23,7 @@ from langchain_core.runnables import (
     RunnableSerializable,
 )
 from langchain_core.vectorstores import VectorStore
-from langchain_openai import AzureOpenAIEmbeddings, OpenAIEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter, TextSplitter
 from pydantic import ConfigDict
 
@@ -84,27 +85,33 @@ def convert_ingestion_input_to_blob(file: UploadFile) -> Blob:
 
 
 def _determine_azure_or_openai_embeddings() -> PGVector:
-    if os.environ.get("OPENAI_API_KEY"):
-        return PGVector(
-            connection_string=PG_CONNECTION_STRING,
-            embedding_function=OpenAIEmbeddings(),
-            use_jsonb=True,
-        )
-    if os.environ.get("AZURE_OPENAI_API_KEY"):
-        return PGVector(
-            connection_string=PG_CONNECTION_STRING,
-            embedding_function=AzureOpenAIEmbeddings(
-                azure_endpoint=os.environ.get("AZURE_OPENAI_API_BASE"),
-                azure_deployment=os.environ.get(
-                    "AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME"
-                ),
-                openai_api_version=os.environ.get("AZURE_OPENAI_API_VERSION"),
-            ),
-            use_jsonb=True,
-        )
-    raise ValueError(
-        "Either OPENAI_API_KEY or AZURE_OPENAI_API_KEY needs to be set for embeddings to work."
+    """Use local/AWS-hosted embedding model via Ollama (no OpenAI key needed)."""
+    import time
+    host_addr = os.environ.get("AWS_LLM_URL", "http://host.docker.internal:11434")
+    # Strip /v1 suffix if present since Ollama client doesn't need it
+    if host_addr.endswith("/v1"):
+        host_addr = host_addr[:-3]
+
+    embedding_fn = OllamaEmbeddings(
+        model=os.environ.get("AWS_EMBED_MODEL", "nomic-embed-text"),
+        base_url=host_addr,
     )
+
+    # Retry up to 3 times to handle race condition when multiple gunicorn
+    # workers try to create the pgvector extension/tables simultaneously.
+    for attempt in range(3):
+        try:
+            return PGVector(
+                connection_string=PG_CONNECTION_STRING,
+                embedding_function=embedding_fn,
+                use_jsonb=True,
+                pre_delete_collection=False,
+            )
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1)
+            else:
+                raise e
 
 
 class IngestRunnable(RunnableSerializable[BinaryIO, List[str]]):
@@ -146,25 +153,31 @@ PG_CONNECTION_STRING = PGVector.connection_string_from_db_params(
     driver="psycopg2",
     host=os.environ.get("POSTGRES_HOST", "localhost"),
     port=int(os.environ.get("POSTGRES_PORT", "5432")),
-    database=os.environ.get("POSTGRES_DB", "opengpts"),
-    user=os.environ.get("POSTGRES_USER", "postgres"),
-    password=os.environ.get("POSTGRES_PASSWORD", "postgres"),
+    database=os.environ.get("POSTGRES_DB", "MyComplianceAi"),
+    user=os.environ.get("POSTGRES_USER", "indupriya"),
+    password=os.environ.get("POSTGRES_PASSWORD", "indupriya"),
 )
-vstore = _determine_azure_or_openai_embeddings()
+@lru_cache(maxsize=1)
+def get_vectorstore() -> PGVector:
+    return _determine_azure_or_openai_embeddings()
 
 
-ingest_runnable = IngestRunnable(
-    text_splitter=RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200),
-    vectorstore=vstore,
-).configurable_fields(
-    assistant_id=ConfigurableField(
-        id="assistant_id",
-        annotation=Optional[str],
-        name="Assistant ID",
-    ),
-    thread_id=ConfigurableField(
-        id="thread_id",
-        annotation=Optional[str],
-        name="Thread ID",
-    ),
-)
+@lru_cache(maxsize=1)
+def get_ingest_runnable():
+    return IngestRunnable(
+        text_splitter=RecursiveCharacterTextSplitter(
+            chunk_size=1000, chunk_overlap=200
+        ),
+        vectorstore=get_vectorstore(),
+    ).configurable_fields(
+        assistant_id=ConfigurableField(
+            id="assistant_id",
+            annotation=Optional[str],
+            name="Assistant ID",
+        ),
+        thread_id=ConfigurableField(
+            id="thread_id",
+            annotation=Optional[str],
+            name="Thread ID",
+        ),
+    )

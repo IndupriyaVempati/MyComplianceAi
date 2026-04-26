@@ -20,11 +20,17 @@ from langchain_community.tools.tavily_search import (
 from langchain_community.utilities.arxiv import ArxivAPIWrapper
 from langchain_community.utilities.dalle_image_generator import DallEAPIWrapper
 from langchain_community.utilities.tavily_search import TavilySearchAPIWrapper
+from langchain_core.callbacks.manager import (
+    AsyncCallbackManagerForRetrieverRun,
+    CallbackManagerForRetrieverRun,
+)
+from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
 from langchain_core.tools import Tool
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
-from app.upload import vstore
+from app.upload import get_vectorstore
 
 
 class DDGInput(BaseModel):
@@ -214,17 +220,49 @@ If the user asks a vague question, they are likely meaning to look up info from 
 GOVERNMENT_NAMESPACE = "__government__"
 
 
+class NamespaceRetriever(BaseRetriever):
+    namespaces: list[str | None]
+    k: int = 4
+
+    def _normalized_namespaces(self) -> list[str]:
+        return [namespace for namespace in self.namespaces if namespace]
+
+    def _search_kwargs(self) -> dict | None:
+        namespaces = self._normalized_namespaces()
+        if not namespaces:
+            return None
+        return {"filter": {"namespace": {"$in": namespaces}}, "k": self.k}
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        search_kwargs = self._search_kwargs()
+        if search_kwargs is None:
+            return []
+        return get_vectorstore().similarity_search(
+            query,
+            **search_kwargs,
+        )
+
+    async def _aget_relevant_documents(
+        self, query: str, *, run_manager: AsyncCallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        search_kwargs = self._search_kwargs()
+        if search_kwargs is None:
+            return []
+        return await get_vectorstore().asimilarity_search(
+            query,
+            **search_kwargs,
+        )
+
+
 def get_government_retriever():
     """Return a retriever scoped exclusively to the government document namespace."""
-    return vstore.as_retriever(
-        search_kwargs={"filter": {"namespace": {"$in": [GOVERNMENT_NAMESPACE]}}, "k": 6}
-    )
+    return NamespaceRetriever(namespaces=[GOVERNMENT_NAMESPACE], k=6)
 
 
 def get_retriever(assistant_id: str, thread_id: str):
-    return vstore.as_retriever(
-        search_kwargs={"filter": {"namespace": {"$in": [assistant_id, thread_id]}}}
-    )
+    return NamespaceRetriever(namespaces=[assistant_id, thread_id], k=4)
 
 
 @lru_cache(maxsize=5)

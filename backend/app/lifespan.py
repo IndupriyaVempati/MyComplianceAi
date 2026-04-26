@@ -15,7 +15,7 @@ logger = structlog.get_logger(__name__)
 # Path to the fixed government documents shipped with the system.
 GOVERNMENT_DOCS_DIR = os.environ.get(
     "GOVERNMENT_DOCS_DIR",
-    "/home/ravi/Pictures/surtn_fixed_docs",
+    "/govt_docs",
 )
 
 
@@ -49,12 +49,14 @@ async def _ingest_government_docs_if_needed() -> None:
     (idempotent across restarts).
     """
     from app.tools import GOVERNMENT_NAMESPACE
-    from app.upload import vstore
+    from app.upload import get_vectorstore
     from app.ingest import ingest_directory_to_namespace
     from app.parsing import MIMETYPE_BASED_PARSER
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     ADVISORY_LOCK_KEY = 8675309  # arbitrary unique int for this lock
+
+    vstore = get_vectorstore()
 
     async with get_pg_pool().acquire() as conn:
         acquired = await conn.fetchval(

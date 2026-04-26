@@ -12,7 +12,7 @@ import app.storage as storage
 from app.api import router as api_router
 from app.auth.handlers import AuthedUser
 from app.lifespan import lifespan
-from app.upload import convert_ingestion_input_to_blob, ingest_runnable
+from app.upload import convert_ingestion_input_to_blob, get_ingest_runnable
 
 logger = structlog.get_logger(__name__)
 
@@ -51,7 +51,7 @@ async def ingest_files(
     if assistant_id is not None:
         for file in files:
             await storage.record_kb_history(user.user_id, "file_uploaded", assistant_id, file.filename)
-    result = await ingest_runnable.abatch(file_blobs, config)
+    result = await get_ingest_runnable().abatch(file_blobs, config)
     return result
 
 

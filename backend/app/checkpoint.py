@@ -12,7 +12,7 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.postgres.base import BasePostgresSaver
 from langgraph.checkpoint.serde.base import SerializerProtocol
-from psycopg import AsyncPipeline
+from psycopg import AsyncPipeline, errors
 from psycopg_pool import AsyncConnectionPool
 
 logger = structlog.get_logger(__name__)
@@ -70,8 +70,18 @@ class AsyncPostgresCheckpoint(BasePostgresSaver):
                 conn=pool, pipe=self.pipe, serde=self.serde
             )
 
-            # Setup will create/migrate the tables if they don't exist
-            await self.async_postgres_saver.setup()
+            # Setup will create/migrate the tables if they don't exist.
+            # Multiple gunicorn workers can race here during startup, so if
+            # another worker wins the migration insert first we can safely
+            # proceed with the already-initialized schema.
+            try:
+                await self.async_postgres_saver.setup()
+            except errors.UniqueViolation as exc:
+                if getattr(exc.diag, "constraint_name", "") != "checkpoint_migrations_pkey":
+                    raise
+                logger.warning(
+                    "Checkpoint setup already completed by another worker."
+                )
 
             logger.warning("Checkpoint setup complete.")
         except Exception as e:

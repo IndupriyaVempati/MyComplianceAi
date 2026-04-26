@@ -1,10 +1,8 @@
-version: "3"
-
 services:
   postgres:
     image: pgvector/pgvector:pg16
     healthcheck:
-      test: pg_isready -U $POSTGRES_USER
+      test: pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
       start_interval: 1s
       start_period: 5s
       interval: 5s
@@ -26,7 +24,7 @@ services:
       - .env
     command: ["-path", "/migrations", "-database", "postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:$POSTGRES_PORT/$POSTGRES_DB?sslmode=disable", "up"]
   backend:
-    container_name: opengpts-backend
+    container_name: mycomplianceai-backend
     build:
       context: backend
     ports:
@@ -55,7 +53,7 @@ services:
       retries: 5
       start_period: 30s
   frontend:
-    container_name: opengpts-frontend
+    container_name: mycomplianceai-frontend
     build:
       context: frontend
     depends_on:

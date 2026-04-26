@@ -570,7 +570,7 @@ export function Config(props: {
 
       // Default LLM type if not set
       if (!vals.configurable["type==chat_retrieval/llm_type"]) {
-        vals.configurable["type==chat_retrieval/llm_type"] = "GPT 3.5 Turbo";
+        vals.configurable["type==chat_retrieval/llm_type"] = "Qwen 3 (Local)";
       }
 
       // Hardcode strict document instruction

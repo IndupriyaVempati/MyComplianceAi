@@ -1,7 +1,7 @@
 from typing import Annotated, List
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 import app.storage as storage
@@ -20,10 +20,6 @@ class AssistantPayload(BaseModel):
         bool, Field(default=False, description="Whether the assistant is public.")
     ]
 
-
-AssistantID = Annotated[str, Path(description="The ID of the assistant.")]
-
-
 @router.get("/")
 async def list_assistants(user: AuthedUser) -> List[Assistant]:
     """List all assistants for the current user."""
@@ -39,7 +35,7 @@ async def list_public_assistants() -> List[Assistant]:
 @router.get("/{aid}")
 async def get_assistant(
     user: AuthedUser,
-    aid: AssistantID,
+    aid: str,
 ) -> Assistant:
     """Get an assistant by ID."""
     assistant = await storage.get_assistant(user.user_id, aid)
@@ -68,7 +64,7 @@ async def create_assistant(
 @router.put("/{aid}")
 async def upsert_assistant(
     user: AuthedUser,
-    aid: AssistantID,
+    aid: str,
     payload: AssistantPayload,
 ) -> Assistant:
     """Create or update an assistant."""
@@ -84,7 +80,7 @@ async def upsert_assistant(
 @router.delete("/{aid}")
 async def delete_assistant(
     user: AuthedUser,
-    aid: AssistantID,
+    aid: str,
 ):
     """Delete an assistant by ID."""
     await storage.delete_assistant(user.user_id, aid)
@@ -95,7 +91,7 @@ async def delete_assistant(
 @router.delete("/{aid}/files/{filename:path}")
 async def delete_assistant_file(
     user: AuthedUser,
-    aid: AssistantID,
+    aid: str,
     filename: str,
 ):
     """Delete vectors belonging to a specific file in an assistant's namespace."""
