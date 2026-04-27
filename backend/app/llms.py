@@ -1,100 +1,69 @@
+"""LLM factory — uses Ollama's OpenAI-compatible API so tool-calling works properly."""
 import os
 from functools import lru_cache
-from urllib.parse import urlparse
 
-import boto3
-import httpx
 import structlog
-from langchain_anthropic import ChatAnthropic
-from langchain_community.chat_models import BedrockChat, ChatFireworks
-from langchain_community.chat_models.ollama import ChatOllama
-from langchain_google_vertexai import ChatVertexAI
-from langchain_openai import AzureChatOpenAI, ChatOpenAI
+from langchain_openai import ChatOpenAI
 
 logger = structlog.get_logger(__name__)
 
 
-@lru_cache(maxsize=4)
-def get_openai_llm(model: str = "gpt-3.5-turbo", azure: bool = False):
-    proxy_url = os.getenv("PROXY_URL")
-    http_client = None
-    if proxy_url:
-        parsed_url = urlparse(proxy_url)
-        if parsed_url.scheme and parsed_url.netloc:
-            http_client = httpx.AsyncClient(proxies=proxy_url)
-        else:
-            logger.warn("Invalid proxy URL provided. Proceeding without proxy.")
+@lru_cache(maxsize=8)
+def get_local_llm(model: str = None) -> ChatOpenAI:
+    """Return a ChatOpenAI client pointed at the local Ollama instance.
 
-    if not azure:
-        try:
-            openai_model = model
-            llm = ChatOpenAI(
-                http_client=http_client,
-                model=openai_model,
-                temperature=0,
-            )
-        except Exception as e:
-            logger.error(
-                f"Failed to instantiate ChatOpenAI due to: {str(e)}. Falling back to AzureChatOpenAI."
-            )
-            llm = AzureChatOpenAI(
-                http_client=http_client,
-                temperature=0,
-                deployment_name=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
-                azure_endpoint=os.environ["AZURE_OPENAI_API_BASE"],
-                openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
-                openai_api_key=os.environ["AZURE_OPENAI_API_KEY"],
-            )
-    else:
-        llm = AzureChatOpenAI(
-            http_client=http_client,
-            temperature=0,
-            deployment_name=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
-            azure_endpoint=os.environ["AZURE_OPENAI_API_BASE"],
-            openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
-            openai_api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        )
-    return llm
+    Env vars:
+      OLLAMA_BASE_URL  – base URL of Ollama (default: http://localhost:11434)
+      OLLAMA_MODEL     – default model key (default: qwen3:8b)
 
+    Individual model overrides:
+      GEMMA_MODEL, QWEN_MODEL, GLM_MODEL
+    """
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    # Ollama's OpenAI-compatible endpoint lives at /v1
+    if not base_url.endswith("/v1"):
+        base_url = base_url.rstrip("/") + "/v1"
 
-@lru_cache(maxsize=2)
-def get_anthropic_llm(bedrock: bool = False):
-    if bedrock:
-        client = boto3.client(
-            "bedrock-runtime",
-            region_name="us-west-2",
-            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-        )
-        model = BedrockChat(model_id="anthropic.claude-v2", client=client)
-    else:
-        model = ChatAnthropic(
-            model_name="claude-3-haiku-20240307",
-            max_tokens_to_sample=2000,
-            temperature=0,
-        )
-    return model
+    model_name = model or os.environ.get("OLLAMA_MODEL", "qwen3:8b")
+    logger.info("Loading local LLM: %s via %s", model_name, base_url)
 
-
-@lru_cache(maxsize=1)
-def get_google_llm():
-    return ChatVertexAI(
-        model_name="gemini-pro", convert_system_message_to_human=True, streaming=True
+    return ChatOpenAI(
+        model=model_name,
+        temperature=0,
+        base_url=base_url,
+        api_key="ollama",          # Ollama ignores the key but langchain requires one
     )
 
 
-@lru_cache(maxsize=1)
+# Convenience helpers for each named model
+def get_gemma_llm() -> ChatOpenAI:
+    return get_local_llm(os.environ.get("GEMMA_MODEL", "gemma3:4b"))
+
+def get_qwen_llm() -> ChatOpenAI:
+    return get_local_llm(os.environ.get("QWEN_MODEL", "qwen3:8b"))
+
+def get_glm_llm() -> ChatOpenAI:
+    return get_local_llm(os.environ.get("GLM_MODEL", "glm4:9b"))
+
+
+# ── Legacy stubs kept so any remaining imports don't break ──────────────────
+def get_openai_llm(model: str = "gpt-3.5-turbo", azure: bool = False):
+    return get_local_llm()
+
+def get_anthropic_llm(bedrock: bool = False):
+    return get_local_llm()
+
+def get_google_llm():
+    return get_local_llm()
+
 def get_mixtral_fireworks():
-    return ChatFireworks(model="accounts/fireworks/models/mixtral-8x7b-instruct")
+    return get_local_llm()
 
-
-@lru_cache(maxsize=1)
-def get_ollama_llm():
-    model_name = os.environ.get("OLLAMA_MODEL")
-    if not model_name:
-        model_name = "llama2"
-    ollama_base_url = os.environ.get("OLLAMA_BASE_URL")
-    if not ollama_base_url:
-        ollama_base_url = "http://localhost:11434"
-
-    return ChatOllama(model=model_name, base_url=ollama_base_url)
+def get_ollama_llm(model_key: str = "default"):
+    model_map = {
+        "default": os.environ.get("OLLAMA_MODEL", "qwen3:8b"),
+        "gemma":   os.environ.get("GEMMA_MODEL", "gemma3:4b"),
+        "qwen":    os.environ.get("QWEN_MODEL", "qwen3:8b"),
+        "glm":     os.environ.get("GLM_MODEL", "glm4:9b"),
+    }
+    return get_local_llm(model_map.get(model_key, os.environ.get("OLLAMA_MODEL", "qwen3:8b")))

@@ -1,7 +1,13 @@
 import markdown
 import re
-from langchain.schema.messages import AnyMessage
-from weasyprint import HTML
+from langchain_core.messages import AnyMessage
+
+try:
+    from weasyprint import HTML as _WeasyHTML
+    _WEASYPRINT_AVAILABLE = True
+except OSError:
+    _WEASYPRINT_AVAILABLE = False
+    _WeasyHTML = None
 
 def generate_pdf_from_messages(thread_name: str, messages: list[AnyMessage]) -> bytes:
     """
@@ -116,5 +122,7 @@ def generate_pdf_from_messages(thread_name: str, messages: list[AnyMessage]) -> 
     full_html = "".join(html_parts)
     
     # Generate PDF via WeasyPrint
-    pdf_bytes = HTML(string=full_html).write_pdf()
+    if not _WEASYPRINT_AVAILABLE:
+        raise RuntimeError("WeasyPrint is not available on this system (missing GTK/GLib libraries). PDF export is disabled.")
+    pdf_bytes = _WeasyHTML(string=full_html).write_pdf()
     return pdf_bytes

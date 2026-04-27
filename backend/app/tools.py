@@ -2,7 +2,7 @@ from enum import Enum
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from langchain.tools.retriever import create_retriever_tool
+from langchain_core.tools.retriever import create_retriever_tool
 from langchain_community.agent_toolkits.connery import ConneryToolkit
 from langchain_community.retrievers.kay import KayAiRetriever
 from langchain_community.retrievers.pubmed import PubMedRetriever
@@ -24,7 +24,9 @@ from langchain_core.tools import Tool
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
-from app.upload import vstore
+from app.vectorstore import get_vectorstore as _get_vstore
+
+vstore = _get_vstore()
 
 
 class DDGInput(BaseModel):
@@ -215,20 +217,52 @@ GOVERNMENT_NAMESPACE = "__government__"
 
 
 def get_government_retriever():
-    """Return a retriever scoped exclusively to the government document namespace."""
+    """Retriever scoped to government/regulatory docs only (Bot1 — primary source)."""
     return vstore.as_retriever(
-        search_kwargs={"filter": {"namespace": {"$in": [GOVERNMENT_NAMESPACE]}}, "k": 6}
+        search_kwargs={
+            "filter": {"namespace": {"$eq": GOVERNMENT_NAMESPACE}},
+            "k": 6,
+        }
     )
 
 
 def get_retriever(assistant_id: str, thread_id: str):
+    """Per-chat KB retriever (Bot2 — secondary source).
+
+    Each chat (thread_id) has its own isolated KB namespace in Pinecone.
+    Documents uploaded inside a chat are stored under thread_id.
+    This means every new chat starts with a clean KB — upload docs to it
+    and they stay scoped to that chat only.
+
+    Namespace resolution:
+      1. thread_id  — primary: docs uploaded in this specific chat
+      2. assistant_id — fallback: shared KB docs (if any were uploaded at assistant level)
+    """
+    namespaces = []
+    if thread_id:
+        namespaces.append(thread_id)
+    if assistant_id and assistant_id != thread_id:
+        namespaces.append(assistant_id)
+
+    if not namespaces:
+        return vstore.as_retriever(
+            search_kwargs={"filter": {"namespace": {"$eq": "__empty__"}}, "k": 0}
+        )
+
+    filter_expr = (
+        {"namespace": {"$eq": namespaces[0]}}
+        if len(namespaces) == 1
+        else {"namespace": {"$in": namespaces}}
+    )
+
     return vstore.as_retriever(
-        search_kwargs={"filter": {"namespace": {"$in": [assistant_id, thread_id]}}}
+        search_kwargs={"filter": filter_expr, "k": 6}
     )
 
 
-@lru_cache(maxsize=5)
+@lru_cache(maxsize=128)
 def get_retrieval_tool(assistant_id: str, thread_id: str, description: str):
+    """LangChain tool that searches this chat's KB."""
     return create_retriever_tool(
         get_retriever(assistant_id, thread_id),
         "Retriever",

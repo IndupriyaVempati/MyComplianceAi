@@ -51,6 +51,14 @@ bcrypt = "^4.0.0"
 stripe = "^11.5.0"
 markdown = "^3.10.2"
 weasyprint = "^68.1"
+# ── Local / offline stack ────────────────────────────────────────────────────
+pinecone-client = "^3.0"
+langchain-pinecone = "^0.2"
+sentence-transformers = "^3.0"
+langchain-community = "^0.3"
+llama-index-core = "^0.12"
+llama-index-readers-file = "^0.4"
+aiosqlite = "^0.20"
 
 [tool.poetry.group.dev.dependencies]
 uvicorn = "^0.23.2"

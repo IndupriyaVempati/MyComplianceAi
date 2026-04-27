@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence, Union
 
@@ -7,6 +8,22 @@ from langchain_core.runnables import RunnableConfig
 from app.agent import agent
 from app.lifespan import get_pg_pool
 from app.schema import Assistant, Thread, User, SupportTicket, SupportMessage, SupportTicketStatus
+
+
+def _json_dumps(v) -> str:
+    """Serialise a dict to JSON string for SQLite storage."""
+    if isinstance(v, str):
+        return v
+    return json.dumps(v)
+
+
+def _json_loads(v) -> dict:
+    """Deserialise a JSON string from SQLite."""
+    if isinstance(v, dict):
+        return v
+    if v is None:
+        return {}
+    return json.loads(v)
 
 
 async def record_kb_history(
@@ -50,8 +67,13 @@ async def list_all_kb_history() -> List[dict]:
 async def list_assistants(user_id: str) -> List[Assistant]:
     """List all assistants (single-tenant: all users see all bots)."""
     async with get_pg_pool().acquire() as conn:
-        records = await conn.fetch("SELECT * FROM assistant WHERE (config->>'deleted')::boolean IS NOT true")
-        return [Assistant(**record) for record in records]
+        records = await conn.fetch("SELECT * FROM assistant")
+        result = []
+        for r in records:
+            cfg = _json_loads(r["config"])
+            if not cfg.get("deleted"):
+                result.append(Assistant(**{**r, "config": cfg}))
+        return result
 
 
 async def get_assistant(user_id: str, assistant_id: str) -> Optional[Assistant]:
@@ -63,14 +85,19 @@ async def get_assistant(user_id: str, assistant_id: str) -> Optional[Assistant]:
         )
         if record is None:
             return None
-        return Assistant(**record)
+        return Assistant(**{**record, "config": _json_loads(record["config"])})
 
 
 async def list_public_assistants() -> List[Assistant]:
     """List all the public assistants."""
     async with get_pg_pool().acquire() as conn:
-        records = await conn.fetch("SELECT * FROM assistant WHERE public IS true AND (config->>'deleted')::boolean IS NOT true")
-        return [Assistant(**record) for record in records]
+        records = await conn.fetch("SELECT * FROM assistant WHERE public = 1")
+        result = []
+        for r in records:
+            cfg = _json_loads(r["config"])
+            if not cfg.get("deleted"):
+                result.append(Assistant(**{**r, "config": cfg}))
+        return result
 
 
 async def put_assistant(
@@ -104,7 +131,7 @@ async def put_assistant(
                 assistant_id,
                 user_id,
                 name,
-                config,
+                _json_dumps(config),
                 updated_at,
                 public,
             )
@@ -129,36 +156,30 @@ async def delete_assistant(user_id: str, assistant_id: str) -> None:
         if record is None:
             return
             
-        config = record["config"]
+        config = _json_loads(record["config"])
         config["deleted"] = True
         
         updated_at = datetime.now(timezone.utc)
         
         await conn.execute(
             "UPDATE assistant SET config = $1, updated_at = $2 WHERE assistant_id = $3",
-            config,
+            _json_dumps(config),
             updated_at,
             assistant_id,
         )
 
 
 async def delete_assistant_file(user_id: str, assistant_id: str, filename: str) -> None:
-    """Delete vectors belonging to a specific file in an assistant's namespace."""
-    async with get_pg_pool().acquire() as conn:
-        # First verify the user has access to this assistant
-        record = await conn.fetchrow(
-            "SELECT 1 FROM assistant WHERE assistant_id = $1",
-            assistant_id,
-        )
-        if record is None:
-            return
-
-        # Delete from pgvector table matching namespace and source
-        await conn.execute(
-            "DELETE FROM langchain_pg_embedding WHERE cmetadata->>'namespace' = $1 AND cmetadata->>'source' = $2",
-            assistant_id,
-            filename,
-        )
+    """Delete vectors belonging to a specific file in an assistant's namespace (Pinecone)."""
+    from app.vectorstore import get_vectorstore
+    vstore = get_vectorstore()
+    # Pinecone: delete by metadata filter
+    try:
+        index = vstore._index  # type: ignore[attr-defined]
+        index.delete(filter={"namespace": assistant_id, "source": filename})
+    except Exception as exc:
+        import structlog as _sl
+        _sl.get_logger(__name__).warning("Could not delete vectors for %s/%s: %s", assistant_id, filename, exc)
 
 
 async def list_threads(user_id: str) -> List[Thread]:
@@ -168,7 +189,10 @@ async def list_threads(user_id: str) -> List[Thread]:
             "SELECT * FROM thread WHERE user_id = $1 ORDER BY updated_at DESC",
             user_id
         )
-        return [Thread(**record) for record in records]
+        return [
+            Thread(**{**r, "metadata": _json_loads(r.get("metadata")) if r.get("metadata") else None})
+            for r in records
+        ]
 
 
 async def save_feedback(
@@ -243,7 +267,7 @@ async def get_thread(user_id: str, thread_id: str) -> Optional[Thread]:
         )
         if record is None:
             return None
-        return Thread(**record)
+        return Thread(**{**record, "metadata": _json_loads(record.get("metadata")) if record.get("metadata") else None})
 
 
 async def get_thread_by_id(thread_id: str) -> Optional[Thread]:
@@ -255,7 +279,7 @@ async def get_thread_by_id(thread_id: str) -> Optional[Thread]:
         )
         if record is None:
             return None
-        return Thread(**record)
+        return Thread(**{**record, "metadata": _json_loads(record.get("metadata")) if record.get("metadata") else None})
 
 
 async def get_thread_state(*, user_id: str, thread_id: str, assistant: Assistant):
@@ -271,63 +295,42 @@ async def get_thread_state(*, user_id: str, thread_id: str, assistant: Assistant
         state = await agent.aget_state(config)
         values = state.values if state.values else None
         return {"values": values, "next": state.next}
-    except (ValueError, Exception) as exc:
-        # Checkpoint contains a message type that the current langchain-core version
-        # cannot deserialize (e.g. LiberalToolMessage left by a stopped stream).
-        # Fall back: read raw channel blobs from Postgres and return whatever we can recover.
+    except Exception as exc:
         import logging
-        import json
-        logger = logging.getLogger(__name__)
-        logger.warning("Failed to deserialize checkpoint for thread %s (%s). Attempting rollback.", thread_id, exc)
+        logging.getLogger(__name__).warning(
+            "Failed to deserialize checkpoint for thread %s (%s). Trying fallback checkpoint loader.",
+            thread_id,
+            exc,
+        )
         try:
-            from app.lifespan import get_pg_pool
-            from langchain_core.messages import message_chunk_to_message
-            async with get_pg_pool().acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT checkpoint_id, checkpoint_ns FROM checkpoints WHERE thread_id = $1 ORDER BY checkpoint_id DESC",
-                    thread_id
-                )
-                corrupt_ids = []
-                valid_state = None
-                
-                for row in rows:
-                    cid = row["checkpoint_id"]
-                    cns = row["checkpoint_ns"]
-                    test_config = {
-                        "configurable": {
-                            "thread_id": thread_id,
-                            "checkpoint_id": cid,
-                            "checkpoint_ns": cns
-                        }
-                    }
-                    try:
-                        # Test if this checkpoint is valid
-                        state = await agent.aget_state(test_config)
-                        valid_state = state
-                        break
-                    except Exception:
-                        corrupt_ids.append((cns, cid))
-                
-                if corrupt_ids:
-                    for cns, cid in corrupt_ids:
-                        await conn.execute("DELETE FROM checkpoint_writes WHERE thread_id = $1 AND checkpoint_ns = $2 AND checkpoint_id = $3", thread_id, cns, cid)
-                        await conn.execute("DELETE FROM checkpoints WHERE thread_id = $1 AND checkpoint_ns = $2 AND checkpoint_id = $3", thread_id, cns, cid)
-                    logger.info("Rolled back %d corrupt checkpoints for thread %s.", len(corrupt_ids), thread_id)
-                    
-                if valid_state:
-                    # Extract the valid messages from the recovered state
-                    values = valid_state.values or {}
-                    messages = values.get("messages", [])
-                    return {
-                        "values": {"messages": [message_chunk_to_message(msg) for msg in messages]},
-                        "next": [], # Clear `next` tasks to avoid "Click to continue" prompts on rolled back states
-                    }
-                else:
-                    logger.error("No valid checkpoints found for thread %s during rollback.", thread_id)
-                    return {"values": {"messages": []}, "next": []}
-        except Exception as fe:
-            logger.error("Fallback recovery also failed for thread %s: %s", thread_id, fe)
-            return {"values": {"messages": []}, "next": []}
+            from app.checkpoint import _AppCheckpointSerializer, _db_path
+            import aiosqlite
+
+            serde = _AppCheckpointSerializer()
+            async with aiosqlite.connect(_db_path()) as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(
+                    """
+                    SELECT type, checkpoint
+                    FROM checkpoints
+                    WHERE thread_id = ?
+                    ORDER BY checkpoint_id DESC
+                    LIMIT 1
+                    """,
+                    (thread_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+            if row:
+                checkpoint = serde.loads_typed((row["type"], row["checkpoint"]))
+                return {
+                    "values": checkpoint.get("channel_values", {"messages": []}),
+                    "next": [],
+                }
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to load fallback checkpoint for thread %s.", thread_id
+            )
+        return {"values": {"messages": []}, "next": []}
 
 
 async def update_thread_state(
@@ -432,7 +435,7 @@ async def put_thread(
             assistant_id,
             name,
             updated_at,
-            metadata,
+            _json_dumps(metadata) if metadata else None,
         )
         return Thread(
             thread_id=thread_id,
@@ -454,15 +457,21 @@ async def delete_thread(user_id: str, thread_id: str):
         )
 
 
+def _row_to_user(r: dict) -> User:
+    """Convert a SQLite row dict to a User, coercing types."""
+    r = dict(r)
+    r["is_admin"] = bool(r.get("is_admin", 0))
+    return User(**r)
+
+
 async def get_or_create_user(sub: str) -> tuple[User, bool]:
     """Returns a tuple of the user and a boolean indicating whether the user was created."""
     async with get_pg_pool().acquire() as conn:
         if record := await conn.fetchrow('SELECT * FROM "user" WHERE sub = $1', sub):
-            return User(**record), False
-        record = await conn.fetchrow(
-            'INSERT INTO "user" (sub) VALUES ($1) RETURNING *', sub
-        )
-        return User(**record), True
+            return _row_to_user(record), False
+        await conn.execute('INSERT INTO "user" (sub) VALUES ($1)', sub)
+        record = await conn.fetchrow('SELECT * FROM "user" WHERE sub = $1', sub)
+        return _row_to_user(record), True
 
 
 async def get_user_by_username(username: str) -> Optional[User]:
@@ -473,7 +482,7 @@ async def get_user_by_username(username: str) -> Optional[User]:
         )
         if record is None:
             return None
-        return User(**record)
+        return _row_to_user(record)
 
 
 async def get_user_by_id(sub: str) -> Optional[User]:
@@ -484,7 +493,7 @@ async def get_user_by_id(sub: str) -> Optional[User]:
         )
         if record is None:
             return None
-        return User(**record)
+        return _row_to_user(record)
 
 
 async def create_user_credentials(
@@ -498,24 +507,26 @@ async def create_user_credentials(
     async with get_pg_pool().acquire() as conn:
         # Check if username exists
         if record := await conn.fetchrow('SELECT * FROM "user" WHERE username = $1', username):
-            return User(**record), False
+            return _row_to_user(record), False
             
         # Use a unique sub based on username for local users
         sub = f"local|{username}"
         
         # If sub already exists (e.g. they logged in via OIDC before), update with username
         if record := await conn.fetchrow('SELECT * FROM "user" WHERE sub = $1', sub):
-            record = await conn.fetchrow(
-                'UPDATE "user" SET username = $1, password_hash = $2, name = $3, phone = $4, is_admin = $5 WHERE sub = $6 RETURNING *',
+            await conn.execute(
+                'UPDATE "user" SET username = $1, password_hash = $2, name = $3, phone = $4, is_admin = $5 WHERE sub = $6',
                 username, password_hash, name, phone, is_admin, sub
             )
-            return User(**record), True
+            record = await conn.fetchrow('SELECT * FROM "user" WHERE sub = $1', sub)
+            return _row_to_user(record), True
             
-        record = await conn.fetchrow(
-            'INSERT INTO "user" (sub, username, password_hash, name, phone, is_admin) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *', 
+        await conn.execute(
+            'INSERT INTO "user" (sub, username, password_hash, name, phone, is_admin) VALUES ($1, $2, $3, $4, $5, $6)',
             sub, username, password_hash, name, phone, is_admin
         )
-        return User(**record), True
+        record = await conn.fetchrow('SELECT * FROM "user" WHERE sub = $1', sub)
+        return _row_to_user(record), True
 
 async def list_all_users() -> list[dict]:
     """Admin function to list all users, including those with pending invites."""
@@ -548,24 +559,13 @@ async def list_all_users() -> list[dict]:
         return users
 
 async def delete_user(user_id: str) -> None:
-    """Admin function to delete a user and all their associated data (threads, assistants, checkpoints)."""
+    """Admin function to delete a user and all their associated data."""
     async with get_pg_pool().acquire() as conn:
         async with conn.transaction():
-            # 1. Gather all thread IDs for this user
             threads = await conn.fetch('SELECT thread_id FROM thread WHERE user_id = $1', user_id)
-            for t in threads:
-                tid = t["thread_id"]
-                # 2. Delete langgraph checkpoints associated with these threads
-                await conn.execute('DELETE FROM checkpoint_blobs WHERE thread_id = $1', tid)
-                await conn.execute('DELETE FROM checkpoint_writes WHERE thread_id = $1', tid)
-                await conn.execute('DELETE FROM checkpoints WHERE thread_id = $1', tid)
-            
-            # 3. Delete assistants and threads
             await conn.execute('DELETE FROM assistant WHERE user_id = $1', user_id)
             await conn.execute('DELETE FROM thread WHERE user_id = $1', user_id)
-            
-            # 4. Finally, delete the user itself
-            await conn.execute('DELETE FROM "user" WHERE user_id = $1::uuid', user_id)
+            await conn.execute('DELETE FROM "user" WHERE user_id = $1', user_id)
 
 async def delete_invite(email: str) -> None:
     """Admin function to delete a pending invite for an email."""
@@ -583,18 +583,19 @@ async def update_user(
     """Admin function to update a user."""
     async with get_pg_pool().acquire() as conn:
         if password_hash:
-            record = await conn.fetchrow(
-                'UPDATE "user" SET username = $1, is_admin = $2, name = $3, phone = $4, password_hash = $5 WHERE user_id = $6::uuid RETURNING *',
+            await conn.execute(
+                'UPDATE "user" SET username = $1, is_admin = $2, name = $3, phone = $4, password_hash = $5 WHERE user_id = $6',
                 username, is_admin, name, phone, password_hash, user_id
             )
         else:
-            record = await conn.fetchrow(
-                'UPDATE "user" SET username = $1, is_admin = $2, name = $3, phone = $4 WHERE user_id = $5::uuid RETURNING *',
+            await conn.execute(
+                'UPDATE "user" SET username = $1, is_admin = $2, name = $3, phone = $4 WHERE user_id = $5',
                 username, is_admin, name, phone, user_id
             )
+        record = await conn.fetchrow('SELECT * FROM "user" WHERE user_id = $1', user_id)
             
         if record:
-            return User(**record)
+            return _row_to_user(record)
         return None
 
 
@@ -671,7 +672,7 @@ async def update_user_password(user_id: str, password_hash: str) -> bool:
     """Update a user's password hash."""
     async with get_pg_pool().acquire() as conn:
         res = await conn.execute(
-            'UPDATE "user" SET password_hash = $1 WHERE user_id = $2::uuid',
+            'UPDATE "user" SET password_hash = $1 WHERE user_id = $2',
             password_hash, user_id,
         )
         return res != "UPDATE 0"
@@ -684,28 +685,25 @@ async def update_user_password(user_id: str, password_hash: str) -> bool:
 async def create_support_ticket(user_id: str, label: Optional[str] = None) -> SupportTicket:
     """Create a new support ticket for a user."""
     async with get_pg_pool().acquire() as conn:
-        record = await conn.fetchrow(
-            """
-            INSERT INTO support_ticket (user_id, label) VALUES ($1, $2)
-            RETURNING *
-            """,
+        await conn.execute(
+            "INSERT INTO support_ticket (user_id, label) VALUES ($1, $2)",
             user_id, label
         )
-        # Fetch username for the returned schema
-        user_record = await conn.fetchrow('SELECT username FROM "user" WHERE user_id = $1::uuid', user_id)
+        record = await conn.fetchrow(
+            "SELECT * FROM support_ticket WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+            user_id
+        )
+        user_record = await conn.fetchrow('SELECT username FROM "user" WHERE user_id = $1', user_id)
         return SupportTicket(**record, username=user_record["username"] if user_record else None)
 
 
 async def get_support_ticket(ticket_id: str) -> Optional[SupportTicket]:
-    """Get a specific support ticket by ID."""
     async with get_pg_pool().acquire() as conn:
         record = await conn.fetchrow(
-            """
-            SELECT st.*, u.username as username
-            FROM support_ticket st
-            LEFT JOIN "user" u ON u.user_id = st.user_id
-            WHERE st.id = $1::uuid
-            """,
+            """SELECT st.*, u.username as username
+               FROM support_ticket st
+               LEFT JOIN "user" u ON u.user_id = st.user_id
+               WHERE st.id = $1""",
             ticket_id
         )
         if record is None:
@@ -714,16 +712,13 @@ async def get_support_ticket(ticket_id: str) -> Optional[SupportTicket]:
 
 
 async def get_support_tickets_for_user(user_id: str) -> List[SupportTicket]:
-    """Get all tickets created by a specific user."""
     async with get_pg_pool().acquire() as conn:
         records = await conn.fetch(
-            """
-            SELECT st.*, u.username as username
-            FROM support_ticket st
-            LEFT JOIN "user" u ON u.user_id = st.user_id
-            WHERE st.user_id = $1::uuid
-            ORDER BY st.created_at DESC
-            """,
+            """SELECT st.*, u.username as username
+               FROM support_ticket st
+               LEFT JOIN "user" u ON u.user_id = st.user_id
+               WHERE st.user_id = $1
+               ORDER BY st.created_at DESC""",
             user_id
         )
         return [SupportTicket(**r) for r in records]
@@ -744,13 +739,9 @@ async def get_all_support_tickets() -> List[SupportTicket]:
 
 
 async def close_support_ticket(ticket_id: str, closed_by: str = "user") -> None:
-    """Mark a ticket as closed, recording whether it was closed by an admin or user."""
     async with get_pg_pool().acquire() as conn:
         await conn.execute(
-            """
-            UPDATE support_ticket SET status = 'closed', closed_by = $2
-            WHERE id = $1::uuid
-            """,
+            "UPDATE support_ticket SET status = 'closed', closed_by = $2 WHERE id = $1",
             ticket_id, closed_by
         )
 
@@ -785,4 +776,3 @@ async def get_support_messages(ticket_id: str) -> List[SupportMessage]:
             ticket_id
         )
         return [SupportMessage(**r) for r in records]
-

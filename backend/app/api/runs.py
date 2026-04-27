@@ -87,7 +87,17 @@ async def stream_run(
     """Create a run."""
     input_, config = await _run_input_and_config(payload, user.user_id)
 
-    return EventSourceResponse(to_sse(astream_state(agent, input_, config)))
+    # Get bot type from config and route to correct executor
+    bot_type = config["configurable"].get("type", "agent")
+    
+    if bot_type == "chat_retrieval":
+        runnable = chat_retrieval
+    elif bot_type == "chatbot":
+        runnable = chatbot
+    else:
+        runnable = agent
+
+    return EventSourceResponse(to_sse(astream_state(runnable, input_, config)))
 
 
 @router.get("/input_schema")

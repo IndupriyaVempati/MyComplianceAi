@@ -196,6 +196,10 @@ def get_dual_retrieval_executor(
         conversation = "\n".join(convo)
         prompt = await search_prompt.ainvoke({"conversation": conversation})
         response = await llm.ainvoke(prompt, {"tags": ["nostream"]})
+        # Strip Qwen3/DeepSeek <think>...</think> reasoning from search queries
+        if isinstance(response.content, str):
+            clean = re.sub(r'<think>.*?</think>', '', response.content, flags=re.DOTALL).strip()
+            response = response.model_copy(update={"content": clean})
         return response
 
     # ------------------------------------------------------------------
@@ -251,9 +255,13 @@ def get_dual_retrieval_executor(
         params = messages[-1].tool_calls[0]
         query = params["args"]["query"]
 
+        # Use run_in_executor to call the SYNC retriever.invoke() in a thread pool.
+        # This avoids the "Session is closed" RuntimeError that occurs when the
+        # Pinecone async aiohttp session is reused across requests.
+        loop = asyncio.get_running_loop()
         gov_response, company_response = await asyncio.gather(
-            gov_retriever.ainvoke(query),
-            company_retriever.ainvoke(query),
+            loop.run_in_executor(None, gov_retriever.invoke, query),
+            loop.run_in_executor(None, company_retriever.invoke, query),
         )
 
         # Apply Lost-in-the-Middle reordering to each set
@@ -282,6 +290,23 @@ def get_dual_retrieval_executor(
     async def arbitrate(state: AgentState):
         messages = _get_messages_for_synthesis(state)
         response = await llm.ainvoke(messages)
+
+        # Strip <think>...</think> reasoning blocks emitted by Qwen3 / DeepSeek models
+        content = response.content
+        if isinstance(content, str):
+            # Remove thinking blocks (including multiline)
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+            # If model wrapped JSON in markdown code block, extract it
+            code_block = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+            if code_block:
+                content = code_block.group(1).strip()
+            # If LLM returned stray text before/after the JSON, extract just the JSON object
+            if not content.startswith('{'):
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if json_match:
+                    content = json_match.group(0).strip()
+            response = response.model_copy(update={"content": content})
+
         return {"messages": [response], "msg_count": 1}
 
     # ------------------------------------------------------------------
@@ -430,7 +455,9 @@ def get_retrieval_executor(
         messages = state["messages"]
         params = messages[-1].tool_calls[0]
         query = params["args"]["query"]
-        response = await retriever.ainvoke(query)
+        # Use run_in_executor to avoid "Session is closed" with Pinecone async client
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(None, retriever.invoke, query)
 
         # Long Context Reordering
         reordering = LongContextReorder()
@@ -445,6 +472,18 @@ def get_retrieval_executor(
     def call_model(state: AgentState):
         messages = state["messages"]
         response = llm.invoke(_get_messages(messages))
+        # Strip <think>...</think> reasoning blocks (Qwen3 / DeepSeek models)
+        content = response.content
+        if isinstance(content, str):
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+            code_block = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+            if code_block:
+                content = code_block.group(1).strip()
+            if not content.startswith('{'):
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if json_match:
+                    content = json_match.group(0).strip()
+            response = response.model_copy(update={"content": content})
         return {"messages": [response], "msg_count": 1}
 
     workflow = StateGraph(AgentState)

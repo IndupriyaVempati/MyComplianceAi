@@ -1,118 +1,142 @@
+"""SQLite-backed LangGraph checkpoint store.
+
+AsyncSqliteSaver requires an open aiosqlite connection for its lifetime,
+so we manage it as a long-lived singleton opened during app startup.
+
+At import time (before startup) we use InMemorySaver as a placeholder so
+agent.py can build its graph. The lifespan replaces it with the real saver.
+"""
+from __future__ import annotations
+
 import os
+from pathlib import Path
 from typing import Any, AsyncIterator, Optional, Sequence
 
+import aiosqlite
 import structlog
 from langgraph.checkpoint.base import (
+    BaseCheckpointSaver,
     ChannelVersions,
     Checkpoint,
     CheckpointMetadata,
     CheckpointTuple,
     RunnableConfig,
 )
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.checkpoint.postgres.base import BasePostgresSaver
-from langgraph.checkpoint.serde.base import SerializerProtocol
-from psycopg import AsyncPipeline
-from psycopg_pool import AsyncConnectionPool
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langchain_core.load.load import Reviver
 
 logger = structlog.get_logger(__name__)
 
+_DEFAULT_DB = str(Path(__file__).parent.parent / "data" / "checkpoints.db")
 
-class AsyncPostgresCheckpoint(BasePostgresSaver):
-    """A singleton implementation of AsyncPostgresSaver with separate setup."""
 
-    _instance = None
+def _db_path() -> str:
+    return os.environ.get("CHECKPOINT_DB_PATH", _DEFAULT_DB)
 
-    def __new__(cls, *args, **kwargs):
-        if not cls._instance:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
-    def __init__(
-        self,
-        pipe: Optional[AsyncPipeline] = None,
-        serde: Optional[SerializerProtocol] = None,
-    ) -> None:
-        if not hasattr(self, "_initialized"):
-            super().__init__(serde=serde)
-            # Initialize basic attributes
-            self.pipe = pipe
-            self.serde = serde
-            self._initialized = True
-            self._setup_complete = False
-            self.async_postgres_saver = None
+class _AppCheckpointSerializer(JsonPlusSerializer):
+    """JsonPlus serializer that can read this app's legacy message subclasses."""
 
-    async def ensure_setup(self) -> None:
-        """Ensure the instance is set up before use."""
-        if not self._setup_complete:
-            await self.setup()
-            self._setup_complete = True
+    _reviver_allowlist = Reviver(
+        allowed_objects="core",
+        valid_namespaces=["app"],
+        additional_import_mappings={
+            ("langchain", "schema", "messages", "LiberalToolMessage"): (
+                "app",
+                "message_types",
+                "LiberalToolMessage",
+            ),
+            ("langchain", "schema", "messages", "LiberalFunctionMessage"): (
+                "app",
+                "message_types",
+                "LiberalFunctionMessage",
+            ),
+        },
+    )
 
-    async def setup(self) -> None:
-        """Internal setup method."""
-        try:
-            conninfo = (
-                f"postgresql://{os.environ['POSTGRES_USER']}:"
-                f"{os.environ['POSTGRES_PASSWORD']}@"
-                f"{os.environ['POSTGRES_HOST']}:"
-                f"{os.environ['POSTGRES_PORT']}/"
-                f"{os.environ['POSTGRES_DB']}"
-            )
+    def _reviver(self, value: dict[str, Any]) -> Any:
+        if value.get("lc") == 1 and value.get("type") == "constructor":
+            return self._reviver_allowlist(value)
+        return super()._reviver(value)
 
-            pool = AsyncConnectionPool(
-                conninfo=conninfo,
-                kwargs={"autocommit": True, "prepare_threshold": 0},
-                open=False,  # Don't open in constructor
-            )
-            await pool.open()
 
-            self.async_postgres_saver = AsyncPostgresSaver(
-                conn=pool, pipe=self.pipe, serde=self.serde
-            )
+# ---------------------------------------------------------------------------
+# Singleton wrapper — delegates to the real saver once startup completes
+# ---------------------------------------------------------------------------
 
-            # Setup will create/migrate the tables if they don't exist
-            await self.async_postgres_saver.setup()
+class _DelegatingSaver(BaseCheckpointSaver):
+    """Wraps either MemorySaver (pre-startup) or AsyncSqliteSaver (post-startup).
 
-            logger.warning("Checkpoint setup complete.")
-        except Exception as e:
-            logger.error(f"Failed to set up AsyncPostgresCheckpoint: {e}")
-            raise
+    This lets agent.py build its LangGraph at import time while still getting
+    persistent SQLite storage once the app has started.
+    """
 
-    async def alist(
-        self,
-        config: Optional[RunnableConfig],
-        *,
-        filter: Optional[dict[str, Any]] = None,
-        before: Optional[RunnableConfig] = None,
-        limit: Optional[int] = None,
-    ) -> AsyncIterator[CheckpointTuple]:
-        """List checkpoints from the database asynchronously."""
-        async for checkpoint in self.async_postgres_saver.alist(
-            config, filter=filter, before=before, limit=limit
-        ):
-            yield checkpoint
+    def __init__(self):
+        super().__init__(serde=_AppCheckpointSerializer())
+        self._inner: BaseCheckpointSaver = MemorySaver(serde=self.serde)
+        self._conn: aiosqlite.Connection | None = None
+
+    async def upgrade(self) -> None:
+        """Switch from MemorySaver to AsyncSqliteSaver. Called by lifespan."""
+        db = Path(_db_path())
+        db.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = await aiosqlite.connect(str(db))
+        saver = AsyncSqliteSaver(self._conn, serde=self.serde)
+        saver.jsonplus_serde = self.serde
+        await saver.setup()
+        self._inner = saver
+        logger.info("SQLite checkpoint store ready at %s", db)
+
+    async def close(self) -> None:
+        if self._conn:
+            await self._conn.close()
+
+    # ── BaseCheckpointSaver interface ────────────────────────────────────────
+
+    def get(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
+        return self._inner.get(config)
+
+    def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
+        return self._inner.get_tuple(config)
+
+    def list(self, config, *, filter=None, before=None, limit=None):
+        return self._inner.list(config, filter=filter, before=before, limit=limit)
+
+    def put(self, config, checkpoint, metadata, new_versions):
+        return self._inner.put(config, checkpoint, metadata, new_versions)
+
+    def put_writes(self, config, writes, task_id):
+        return self._inner.put_writes(config, writes, task_id)
 
     async def aget_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
-        """Get a checkpoint tuple from the database asynchronously."""
-        return await self.async_postgres_saver.aget_tuple(config)
+        return await self._inner.aget_tuple(config)
 
-    async def aput(
-        self,
-        config: RunnableConfig,
-        checkpoint: Checkpoint,
-        metadata: CheckpointMetadata,
-        new_versions: ChannelVersions,
-    ) -> RunnableConfig:
-        """Save a checkpoint to the database asynchronously."""
-        return await self.async_postgres_saver.aput(
-            config, checkpoint, metadata, new_versions
-        )
+    async def alist(self, config, *, filter=None, before=None, limit=None) -> AsyncIterator[CheckpointTuple]:
+        async for item in self._inner.alist(config, filter=filter, before=before, limit=limit):
+            yield item
 
-    async def aput_writes(
-        self,
-        config: RunnableConfig,
-        writes: Sequence[tuple[str, Any]],
-        task_id: str,
-    ) -> None:
-        """Store intermediate writes linked to a checkpoint asynchronously."""
-        await self.async_postgres_saver.aput_writes(config, writes, task_id)
+    async def aput(self, config, checkpoint, metadata, new_versions) -> RunnableConfig:
+        return await self._inner.aput(config, checkpoint, metadata, new_versions)
+
+    async def aput_writes(self, config, writes, task_id) -> None:
+        await self._inner.aput_writes(config, writes, task_id)
+
+
+# Module-level singleton — used by agent.py at import time
+_CHECKPOINTER = _DelegatingSaver()
+
+
+def get_checkpointer() -> _DelegatingSaver:
+    return _CHECKPOINTER
+
+
+async def setup_checkpointer() -> _DelegatingSaver:
+    """Upgrade to SQLite. Call once from lifespan startup."""
+    await _CHECKPOINTER.upgrade()
+    return _CHECKPOINTER
+
+
+# Backwards-compat: agent.py does  CHECKPOINTER = AsyncPostgresCheckpoint()
+AsyncPostgresCheckpoint = lambda: _CHECKPOINTER  # noqa: E731

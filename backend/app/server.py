@@ -1,6 +1,10 @@
 import os
 from pathlib import Path
 
+# Load .env before any app imports so env vars are available at module level
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 import orjson
 import structlog
 from fastapi import FastAPI, Form, UploadFile

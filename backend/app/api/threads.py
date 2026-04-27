@@ -4,7 +4,7 @@ from uuid import uuid4
 import re
 
 from fastapi import APIRouter, HTTPException, Path, UploadFile, Form
-from langchain.schema.messages import AnyMessage
+from langchain_core.messages import AnyMessage
 from pydantic import BaseModel, Field
 
 import app.storage as storage

@@ -113,11 +113,22 @@ export function Chat(props: ChatProps) {
       </div>
     );
 
+  const isLoadedEmpty =
+    messages !== null &&
+    messages.length === 0 &&
+    props.stream?.status !== "inflight";
+
   return (
     <div id="chat-container" className="flex flex-col flex-1 h-full overflow-hidden">
       {/* Scrollable messages area */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-[720px] mx-auto w-full px-5 py-6">
+          {isLoadedEmpty && (
+            <div className="min-h-[calc(100vh-260px)] flex items-center justify-center text-sm text-slate-400">
+              No messages yet.
+            </div>
+          )}
+
           {messages?.map((msg, i) =>
             editing[msg.id] ? (
               <MessageEditor
@@ -152,7 +163,7 @@ export function Chat(props: ChatProps) {
                     if (nextVisible) {
                       return nextVisible.type === "human";
                     }
-                    return false; // User requested badge ONLY if there are two continuous human messages
+                    return props.stream?.status !== "inflight";
                   })()
                 }
               />

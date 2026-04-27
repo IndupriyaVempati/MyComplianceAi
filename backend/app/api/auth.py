@@ -105,7 +105,7 @@ async def login(request: LoginRequest):
     # Update last_seen timestamp
     async with storage.get_pg_pool().acquire() as conn:
         await conn.execute(
-            'UPDATE "user" SET last_seen = NOW() WHERE sub = $1',
+            'UPDATE "user" SET last_seen = datetime(\'now\') WHERE sub = $1',
             user.sub
         )
     return {"access_token": access_token, "token_type": "bearer"}

@@ -1,5 +1,8 @@
 from langchain.tools import BaseTool
-from langchain.tools.render import render_text_description
+try:
+    from langchain.tools.render import render_text_description
+except ImportError:
+    from langchain_core.tools.render import render_text_description
 from langchain_core.language_models.base import LanguageModelLike
 from langchain_core.messages import (
     AIMessage,
@@ -10,7 +13,21 @@ from langchain_core.messages import (
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END
 from langgraph.graph.message import MessageGraph
-from langgraph.prebuilt import ToolExecutor, ToolInvocation
+try:
+    from langgraph.prebuilt import ToolExecutor, ToolInvocation
+except ImportError:
+    class ToolInvocation:  # type: ignore[no-redef]
+        def __init__(self, tool: str, tool_input):
+            self.tool = tool
+            self.tool_input = tool_input
+
+    class ToolExecutor:  # type: ignore[no-redef]
+        def __init__(self, tools):
+            self._tools = {t.name: t for t in tools}
+
+        async def ainvoke(self, action):
+            t = self._tools[action.tool]
+            return await t.arun(action.tool_input) if hasattr(t, "arun") else t.run(action.tool_input)
 
 from app.agent_types.prompts import xml_template
 from app.message_types import LiberalFunctionMessage
